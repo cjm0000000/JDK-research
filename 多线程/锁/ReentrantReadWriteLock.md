@@ -10,8 +10,8 @@
 
 这个类不强制要求读线程或者写线程获得锁的顺序。但是它提供一个可选的公平策略。
 
-> Non-fair mode (default)  
-When constructed as non-fair (the default), the order of entry to the read and write lock is unspecified, subject to reentrancy constraints. A nonfair lock that is continuously contended may indefinitely postpone one or more reader or writer threads, but will normally have higher throughput than a fair lock.
+> 非公平模式 (默认)  
+当用非公平模式构造`ReentrantReadWriteLock`(默认构造器)，进入读锁和写锁的顺序是没有指定的，以重入约束为准。一个非公平锁即:不断竞争可能会使一个或多个读（写）线程无限期延迟，但是通常能提供比公平锁更高的吞吐量。
 
 > Fair mode  
 When constructed as fair, threads contend for entry using an approximately arrival-order policy. When the currently held lock is released either the longest-waiting single writer thread will be assigned the write lock, or if there is a group of reader threads waiting longer than all waiting writer threads, that group will be assigned the read lock.
