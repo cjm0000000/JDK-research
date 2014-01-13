@@ -21,27 +21,32 @@
     如果有写锁保持或者存在一个正在等待的写线程，那么一个线程试图获取一个公平的读锁（非重入获取）将会被阻塞。这个线程将无法获得读锁，直到最早等待的写线程获取到锁并且释放写锁。当然，如果一个等待的写线程放弃等待，留下一个或多个读线程作为队列里面等待时间最长的等待者等待写锁释放，然后这些线程将被分配读锁。
 一个线程尝试获取一个公平的写锁（非重入获取）将会阻塞除非所有的读锁和写锁都释放（意味着没有等待的线程）。(需要注意的是非阻塞方法`ReentrantReadWriteLock.ReadLock.tryLock()`和`ReentrantReadWriteLock.WriteLock.tryLock()`不履行这个公平设置并且将会获得锁，不管是否有等待的线程。)
 
-- __重入__  
+- __重入__
+
     这个锁像`ReentrantLock`一样，允许读写线程两者都可以重新获取读锁或者写锁（笔者注释：读线程只能重新获取读锁；写线程可以获取读锁和写锁）。非重入的读线程不允许进入锁，除非所有写线程保持的写锁都被释放。
 此外，一个写线程可以获取到读锁，但是反过来则不行。在某些应用中，当在调用或者回调的方法在读锁下执行读操作的时候写锁一直保持，重入很有用。
 
-- __锁降级__  
+- __锁降级__
+
  重入同样允许写锁降级为读锁，通过获取写锁，然后获取读锁，然后释放写锁。然而从读锁升级成写锁是不可能的。
 
-- __锁中断__  
+- __锁中断__
+
  读锁和写锁在锁定的时候都支持中断。
 
-- __条件支持__  
+- __条件支持__
+
  写锁为相同行为提供了一个`Condition`的实现，和由`ReentrantLock.newCondition()`为`ReentrantLock`提供的`Condition`实现一样。这个条件只能被写锁使用。
 
  锁不支持条件并且`readLock().newCondition()`抛出`UnsupportedOperationException`异常。
 
-- __植入?__  
- 这个类支持方法去决定是继续保持锁还是竞争。这些方法被设计来做系统状态监控，不是为了同步控制。
+- __植入?__
+
+ 这个类支持让方法决定是继续保持锁还是竞争。这些方法被设计来做系统状态监控，不是为了同步控制。
 
 此类行为同样以内置锁的方式序列化：反序列化的锁处于解锁状态，不管序列化的时候是什么状态。
 
-__Sample usages.__ Here is a code sketch showing how to perform lock downgrading after updating a cache (exception handling is particularly tricky when handling multiple locks in a non-nested fashion):   
+__示例用法.__ 这里有一个代码草图演示如何在更新一个缓存后执行锁降级（当非嵌套方式处理多个锁的时候异常处理尤其棘手）：
 
 	class CachedData {
 	   Object data;
@@ -67,11 +72,45 @@ __Sample usages.__ Here is a code sketch showing how to perform lock downgrading
 	          rwl.writeLock().unlock(); // Unlock write, still hold read
 	        }
 	     }
-
+	
 	     try {
 	       use(data);
 	     } finally {
 	       rwl.readLock().unlock();
 	     }
-     	   }
-	}
+	   }
+	 }
+	 
+ReentrantReadWriteLocks can be used to improve concurrency in some uses of some kinds of Collections. This is typically worthwhile only when the collections are expected to be large, accessed by more reader threads than writer threads, and entail operations with overhead that outweighs synchronization overhead. For example, here is a class using a TreeMap that is expected to be large and concurrently accessed.
+
+    class RWDictionary {
+	    private final Map<String, Data> m = new TreeMap<String, Data>();
+	    private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
+	    private final Lock r = rwl.readLock();
+	    private final Lock w = rwl.writeLock();
+	
+	    public Data get(String key) {
+	        r.lock();
+	        try { return m.get(key); }
+	        finally { r.unlock(); }
+	    }
+	    public String[] allKeys() {
+	        r.lock();
+	        try { return m.keySet().toArray(); }
+	        finally { r.unlock(); }
+	    }
+	    public Data put(String key, Data value) {
+	        w.lock();
+	        try { return m.put(key, value); }
+	        finally { w.unlock(); }
+	    }
+	    public void clear() {
+	        w.lock();
+	        try { m.clear(); }
+	        finally { w.unlock(); }
+	    }
+	 }
+
+__Implementation Notes__
+
+This lock supports a maximum of 65535 recursive write locks and 65535 read locks. Attempts to exceed these limits result in Error throws from locking methods.
