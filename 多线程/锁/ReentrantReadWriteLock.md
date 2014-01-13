@@ -140,9 +140,94 @@ __ReentrantReadWriteLock中的AQS__
       // 写锁是否被保持
       boolean isHeldExclusively();
       
+  下面开始分析`tryAcquire`源码：
+  
+      protected final boolean tryAcquire(int acquires) {
+            /*
+             * Walkthrough:
+             * 1. If read count nonzero or write count nonzero
+             *    and owner is a different thread, fail.
+             * 2. If count would saturate, fail. (This can only
+             *    happen if count is already nonzero.)
+             * 3. Otherwise, this thread is eligible for lock if
+             *    it is either a reentrant acquire or
+             *    queue policy allows it. If so, update state
+             *    and set owner.
+             */
+            Thread current = Thread.currentThread();
+            int c = getState();// 获取当前计数器值
+            int w = exclusiveCount(c);// 获取写锁持有的计数器值
+            if (c != 0) {// 计数器不等于0，说明有线程保持了锁（可能是读锁也可能是写锁）
+                // (Note: if c != 0 and w == 0 then shared count != 0)
+                if (w == 0 || current != getExclusiveOwnerThread())// 没有写锁，或者当前线程不是当前保持写锁的线程（前提是计数器不等于0），所以获取写锁失败了
+                    return false;
+                if (w + exclusiveCount(acquires) > MAX_COUNT)// 写计数器溢出了
+                    throw new Error("Maximum lock count exceeded");
+                // Reentrant acquire	在排除了各种不符合的条件后，开始获取写锁（重入获取）
+                setState(c + acquires);// 设置计数器状态，为什么不用compareAndSetState？
+                return true;
+            }
+            // 代码走到这里说明了计数器状态是0，全新获取写锁，非重入方式获取
+            if (writerShouldBlock() ||
+                !compareAndSetState(c, c + acquires))// 如果需要阻塞写锁或者设置计数器状态出错了，返回失败
+                return false;
+            // 执行到这里只有一种情况：正常获取写锁
+            setExclusiveOwnerThread(current);// 设置当前线程为排他线程
+            // 为什么不用设置计数器状态？其实上面的代码compareAndSetState(c, c + acquires)已经设置过了，执行到这里，证明compareAndSetStat执行成功了。
+            return true;
+        }
+        
+  这个方法用于获取写锁，实现思路是这样的：  
+1. 如果读计数器不为0或者写计数器不为0并且持有锁的线程不是当前线程，则失败。  
+2. 如果计数器饱和，则失败。（这只能在计数器非0的时候发生，意味着只能是重入获取锁的时候发生）
+3. 否则，这个线程符合上锁条件，不管这个线程是重入获取锁还是排队策略允许它获取锁。如果是这样的话，更新状态（`compareAndSetState`）并且设置锁的所有者(`setExclusiveOwnerThread`)。
+
+  成功获取锁则返回`true`，失败有两种情况：普通失败返回`false`，计数器饱和直接抛出`java.lang.Error`。
+  
+  下面是`tryRelease`的源码：
+  
+        /*
+         * Note that tryRelease and tryAcquire can be called by
+         * Conditions. So it is possible that their arguments contain
+         * both read and write holds that are all released during a
+         * condition wait and re-established in tryAcquire.
+         */
+
+        protected final boolean tryRelease(int releases) {
+            if (!isHeldExclusively())// 如果当前线程没有保持写锁，释放写锁失败，抛出异常
+                throw new IllegalMonitorStateException();
+            int nextc = getState() - releases;// 计算这次释放后计数器剩余的值
+            boolean free = exclusiveCount(nextc) == 0;// 计算释放后是不是彻底放弃写锁
+            if (free)// 如果彻底放弃写锁，需要设置保持排他的线程为空
+                setExclusiveOwnerThread(null);
+            setState(nextc);
+            return free;
+        }
+        
+  这个方法用于释放写锁，需要知道的是`tryRelease`和`tryAcquire`可以通过条件调用。所以在某个条件等待的时候他们的包含读和写计数值的参数被全部释放并且在`tryAcquire`的时候重新建立。
+  
+  `isHeldExclusively`的原理很简单：
+  
+        protected final boolean isHeldExclusively() {
+            // While we must in general read state before owner, 我们需要在设置写锁所有者之前读取状态
+            // we don't need to do so to check if current thread is owner  我们不需要检测当前状态是否是写锁所有者
+            return getExclusiveOwnerThread() == Thread.currentThread();
+        }
+        
+  写锁还需要提供几个额外的API：
+  
+      boolean tryWriteLock();// 和`tryAcquire`逻辑一致，除了一点：它不调用`writerShouldBlock()`
       
-  
-  
+      ConditionObject newCondition();// 新建一个条件
+      
+      boolean isWriteLocked();// 判断是否有写锁锁定
+      
+      int getWriteHoldCount();// 获取写锁计数器值
+      
+      boolean writerShouldBlock();// 这个取决于具体的实现，比如锁是否是公平的；  
+      如果是公平锁，需要通过hasQueuedPredecessors查询是否存在比当前线程等待时间更长的需要获取锁的线程来决定是否阻塞当前线程。
+      如果是非公平锁，不需要阻塞。
+      
   
   
   
