@@ -2,7 +2,9 @@
 
 [Java Doc 地址] (http://docs.oracle.com/javase/7/docs/api/java/util/concurrent/locks/ReentrantReadWriteLock.html)
 
-`ReentrantReadWriteLock`是`ReadWriteLock`接口的实现，提供类似`ReentrantLock`的语义（作者觉得是指可重入）
+## 文档翻译
+
+`ReentrantReadWriteLock`是`ReadWriteLock`接口的实现，提供类似`ReentrantLock`的语义（*作者觉得是指可重入*）
 
 这个类具有有下面的一些属性:
 
@@ -23,7 +25,7 @@
 
 - __重入__
 
-    这个锁像`ReentrantLock`一样，允许读写线程两者都可以重新获取读锁或者写锁（笔者注释：读线程只能重新获取读锁；写线程可以获取读锁和写锁）。非重入的读线程不允许进入锁，除非所有写线程保持的写锁都被释放。
+    这个锁像`ReentrantLock`一样，允许读写线程两者都可以重新获取读锁或者写锁（*笔者注释：读线程只能重新获取读锁；写线程可以获取读锁和写锁*）。非重入的读线程不允许进入锁，除非所有写线程保持的写锁都被释放。
 此外，一个写线程可以获取到读锁，但是反过来则不行。在某些应用中，当在调用或者回调的方法在读锁下执行读操作的时候写锁一直保持，重入很有用。
 
 - __锁降级__
@@ -81,7 +83,8 @@ __示例用法.__ 这里有一个代码草图演示如何在更新一个缓存�
 	   }
 	 }
 	 
-ReentrantReadWriteLocks can be used to improve concurrency in some uses of some kinds of Collections. This is typically worthwhile only when the collections are expected to be large, accessed by more reader threads than writer threads, and entail operations with overhead that outweighs synchronization overhead. For example, here is a class using a TreeMap that is expected to be large and concurrently accessed.
+
+`ReentrantReadWriteLocks`在某些类型的集合中可以用来提高并发。只有当集合容量预期很大，读线程多于写线程并且操作（*笔者认为是线程临界区里的逻辑运算*）需要的开销超过同步开销，这通常是值得做的。例如，这是一个预计将大并发访问大容量`TreeMap`的类。
 
     class RWDictionary {
 	    private final Map<String, Data> m = new TreeMap<String, Data>();
@@ -111,6 +114,130 @@ ReentrantReadWriteLocks can be used to improve concurrency in some uses of some 
 	    }
 	 }
 
-__Implementation Notes__
+__实现说明__
 
-This lock supports a maximum of 65535 recursive write locks and 65535 read locks. Attempts to exceed these limits result in Error throws from locking methods.
+此锁支持最大65535次递归写锁和65535次读锁。试图超出这些限制将在锁定方法抛出`java.lang.Error`。
+
+## 内部实现
+
+`ReentrantReadWriteLock`的内部实现是基于`AbstractQueuedSynchronizer`抽象类。
+
+AQS相关的内容请参考：  
+[AbstractQueuedSynchronizer的介绍和原理分析](http://ifeve.com/introduce-abstractqueuedsynchronizer/)  
+[AQS的原理浅析](http://ifeve.com/java-special-troops-aqs/)  
+
+
+__ReentrantReadWriteLock中的AQS__
+
+  - __写锁__
+
+  写锁的操作相对简单，`ReentrantReadWriteLock`中的AQS主要实现了这几个方法：
+      
+      // 尝试获取写锁
+      boolean tryAcquire(int acquires);
+      // 尝试释放写锁
+      boolean tryRelease(int releases);
+      // 写锁是否被保持
+      boolean isHeldExclusively();
+      
+      
+  
+  
+  
+  
+  
+  - __读锁__
+
+此锁中的读计数器是所有持有读锁的线程共同维护的，并且每个持有读锁的线程都必须维护自身的读计数器。
+
+看下面这段代码：
+
+        /**
+         * A counter for per-thread read hold counts.
+         * Maintained as a ThreadLocal; cached in cachedHoldCounter
+         */
+        static final class HoldCounter {
+            int count = 0;
+            // Use id, not reference, to avoid garbage retention
+            final long tid = Thread.currentThread().getId();
+        }
+        
+`HoldCounter`为每个线程保存读计数器，缓存在变量cachedHoldCounter中，作为`ThreadLocal`维护。
+
+        /**
+         * ThreadLocal subclass. Easiest to explicitly define for sake
+         * of deserialization mechanics.
+         */
+        static final class ThreadLocalHoldCounter
+            extends ThreadLocal<HoldCounter> {
+            public HoldCounter initialValue() {
+                return new HoldCounter();
+            }
+        }
+        
+`ThreadLocalHoldCounter`是一个`ThreadLocal`的子类，它里面保存的对象是`HoldCounter`，从代码中可以看出它会为一个新的线程创建一个新的`HoldCounter`.
+        
+        /**
+         * The hold count of the last thread to successfully acquire
+         * readLock. This saves ThreadLocal lookup in the common case
+         * where the next thread to release is the last one to
+         * acquire. This is non-volatile since it is just used
+         * as a heuristic, and would be great for threads to cache.
+         *
+         * <p>Can outlive the Thread for which it is caching the read
+         * hold count, but avoids garbage retention by not retaining a
+         * reference to the Thread.
+         *
+         * <p>Accessed via a benign data race; relies on the memory
+         * model's final field and out-of-thin-air guarantees.
+         */
+        private transient HoldCounter cachedHoldCounter;
+        
+再来看看变量`cachedHoldCounter`的注释：  
+最后一个成功持有读锁的线程的计数器。这样做可以节省在通常情况下`ThreadLocal`的查找，其中的下一个线程的释放是最后一个获取的。这是非易失性的因为这只是用作启发式，线程缓存他们很好。  被保存的线程读计数器可以活的比线程长，但是通过不保持它到线程的引用来避免垃圾滞留。  
+通过一个良性数据争用存取；依赖于内存模型的常量字段和最低限度的安全性保证。
+
+
+        /**
+         * The number of reentrant read locks held by current thread.
+         * Initialized only in constructor and readObject.
+         * Removed whenever a thread's read hold count drops to 0.
+         */
+        private transient ThreadLocalHoldCounter readHolds;
+
+`readHolds`是指当前线程保持的读计数器。只在构造器和`readObject`方法中初始化。每当一个线程的读计数器下降到0，移除当前线程`readHolds`的值。
+
+        /**
+         * firstReader is the first thread to have acquired the read lock.
+         * firstReaderHoldCount is firstReader's hold count.
+         *
+         * <p>More precisely, firstReader is the unique thread that last
+         * changed the shared count from 0 to 1, and has not released the
+         * read lock since then; null if there is no such thread.
+         *
+         * <p>Cannot cause garbage retention unless the thread terminated
+         * without relinquishing its read locks, since tryReleaseShared
+         * sets it to null.
+         *
+         * <p>Accessed via a benign data race; relies on the memory
+         * model's out-of-thin-air guarantees for references.
+         *
+         * <p>This allows tracking of read holds for uncontended read
+         * locks to be very cheap.
+         */
+        private transient Thread firstReader = null;
+        private transient int firstReaderHoldCount;
+        
+`firstReader`是一个线程实例，它是第一个获取到读锁的线程。同样的道理，`firstReaderHoldCount`是`firstReader`线程保持的读计数器。  
+更确切地说，`firstReader`是把读计数器从0变到1的那个独特的线程，并且从那以后没有释放读锁；如果没有这样的线程，这个字段为空。  
+因为`tryReleaseShared`方法会把它设置为空,所以无法造成垃圾滞留除非线程线程终止而没有放弃它的读锁。  
+通过一个良性数据争用存取；依赖于内存模型的最低限度的安全性保证引用。  
+这种允许跟踪读计数器的方式对无竞争的读锁来说是非常便宜的。
+
+
+__公平锁__
+
+__非公平锁__
+
+
+
