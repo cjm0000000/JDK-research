@@ -233,9 +233,31 @@ __ReentrantReadWriteLock中的AQS__
   
   - __读锁__
 
-此锁中的读计数器是所有持有读锁的线程共同维护的，并且每个持有读锁的线程都必须维护自身的读计数器。
+ 读锁的实现相对复杂一些，`ReentrantReadWriteLock`中的AQS读锁相关的方法如下：  
+ 
+        // 尝试加读锁  
+        int tryAcquireShared(int unused);  
+        // 尝试释放读锁  
+        boolean tryReleaseShared(int unused);
+        
+ 此外还有一些辅助的变量和方法：  
+ 
+         int sharedCount(int c);
+         
+         private transient ThreadLocalHoldCounter readHolds;
+         
+         private transient HoldCounter cachedHoldCounter;
+         
+         private transient Thread firstReader = null;
+         
+         private transient int firstReaderHoldCount;
+         
+         boolean readerShouldBlock();
+         
+         int getReadHoldCount();
+     
 
-看下面这段代码：
+ 下面详细分析这些字段和方法：
 
         /**
          * A counter for per-thread read hold counts.
@@ -247,7 +269,7 @@ __ReentrantReadWriteLock中的AQS__
             final long tid = Thread.currentThread().getId();
         }
         
-`HoldCounter`为每个线程保存读计数器，缓存在变量cachedHoldCounter中，作为`ThreadLocal`维护。
+ `HoldCounter`为每个线程保存读计数器，缓存在变量`cachedHoldCounter`中，作为`ThreadLocal`维护。
 
         /**
          * ThreadLocal subclass. Easiest to explicitly define for sake
@@ -260,7 +282,7 @@ __ReentrantReadWriteLock中的AQS__
             }
         }
         
-`ThreadLocalHoldCounter`是一个`ThreadLocal`的子类，它里面保存的对象是`HoldCounter`，从代码中可以看出它会为一个新的线程创建一个新的`HoldCounter`.
+ `ThreadLocalHoldCounter`是一个`ThreadLocal`的子类，它里面保存的对象是`HoldCounter`，从代码中可以看出它会为一个新的线程创建一个新的`HoldCounter`.
         
         /**
          * The hold count of the last thread to successfully acquire
@@ -278,8 +300,8 @@ __ReentrantReadWriteLock中的AQS__
          */
         private transient HoldCounter cachedHoldCounter;
         
-再来看看变量`cachedHoldCounter`的注释：  
-最后一个成功持有读锁的线程的计数器。这样做可以节省在通常情况下`ThreadLocal`的查找，其中的下一个线程的释放是最后一个获取的。这是非易失性的因为这只是用作启发式，线程缓存他们很好。  被保存的线程读计数器可以活的比线程长，但是通过不保持它到线程的引用来避免垃圾滞留。  
+ 再来看看变量`cachedHoldCounter`的注释：  
+ 最后一个成功持有读锁的线程的计数器。这样做可以节省在通常情况下`ThreadLocal`的查找，其中的下一个线程的释放是最后一个获取的。这是非易失性的因为这只是用作启发式，线程缓存他们很好。  被保存的线程读计数器可以活的比线程长，但是通过不保持它到线程的引用来避免垃圾滞留。  
 通过一个良性数据争用存取；依赖于内存模型的常量字段和最低限度的安全性保证。
 
 
@@ -290,7 +312,7 @@ __ReentrantReadWriteLock中的AQS__
          */
         private transient ThreadLocalHoldCounter readHolds;
 
-`readHolds`是指当前线程保持的读计数器。只在构造器和`readObject`方法中初始化。每当一个线程的读计数器下降到0，移除当前线程`readHolds`的值。
+ `readHolds`是指当前线程保持的读计数器。只在构造器和`readObject`方法中初始化。每当一个线程的读计数器下降到0，移除当前线程`readHolds`的值。
 
         /**
          * firstReader is the first thread to have acquired the read lock.
@@ -313,12 +335,59 @@ __ReentrantReadWriteLock中的AQS__
         private transient Thread firstReader = null;
         private transient int firstReaderHoldCount;
         
-`firstReader`是一个线程实例，它是第一个获取到读锁的线程。同样的道理，`firstReaderHoldCount`是`firstReader`线程保持的读计数器。  
+ `firstReader`是一个线程实例，它是第一个获取到读锁的线程。同样的道理，`firstReaderHoldCount`是`firstReader`线程保持的读计数器。  
 更确切地说，`firstReader`是把读计数器从0变到1的那个独特的线程，并且从那以后没有释放读锁；如果没有这样的线程，这个字段为空。  
-因为`tryReleaseShared`方法会把它设置为空,所以无法造成垃圾滞留除非线程线程终止而没有放弃它的读锁。  
+ 因为`tryReleaseShared`方法会把它设置为空,所以无法造成垃圾滞留除非线程线程终止而没有放弃它的读锁。  
 通过一个良性数据争用存取；依赖于内存模型的最低限度的安全性保证引用。  
 这种允许跟踪读计数器的方式对无竞争的读锁来说是非常便宜的。
 
+        protected final int tryAcquireShared(int unused) {
+            /*
+             * Walkthrough:
+             * 1. If write lock held by another thread, fail.
+             * 2. Otherwise, this thread is eligible for
+             *    lock wrt state, so ask if it should block
+             *    because of queue policy. If not, try
+             *    to grant by CASing state and updating count.
+             *    Note that step does not check for reentrant
+             *    acquires, which is postponed to full version
+             *    to avoid having to check hold count in
+             *    the more typical non-reentrant case.
+             * 3. If step 2 fails either because thread
+             *    apparently not eligible or CAS fails or count
+             *    saturated, chain to version with full retry loop.
+             */
+            Thread current = Thread.currentThread();
+            int c = getState();
+            if (exclusiveCount(c) != 0 &&
+                getExclusiveOwnerThread() != current)
+                return -1;
+            int r = sharedCount(c);
+            if (!readerShouldBlock() &&
+                r < MAX_COUNT &&
+                compareAndSetState(c, c + SHARED_UNIT)) {
+                if (r == 0) {
+                    firstReader = current;
+                    firstReaderHoldCount = 1;
+                } else if (firstReader == current) {
+                    firstReaderHoldCount++;
+                } else {
+                    HoldCounter rh = cachedHoldCounter;
+                    if (rh == null || rh.tid != current.getId())
+                        cachedHoldCounter = rh = readHolds.get();
+                    else if (rh.count == 0)
+                        readHolds.set(rh);
+                    rh.count++;
+                }
+                return 1;
+            }
+            return fullTryAcquireShared(current);
+        }
+        
+ `tryAcquireShared`这个方法的实现思路是这样的：  
+1. 如果另一个线程保持写锁，则失败。
+2. 否则，这个线程符合锁的状态，由于排队策略，所以需要询问是否应该阻塞。如果不阻塞，尝试通CAS更改状态和更新计数器值取得授权。注意哪些步骤没有检测重入获取，这会推迟到`fullTryAcquireShared`去避免在典型的不可重入的场景必须检测保持的计数器。
+3. 如果步骤2失败，要么是线程不符合条件，要么CAS失败，要么计数器值溢出，链接到方法`fullTryAcquireShared`。
 
 __公平锁__
 
