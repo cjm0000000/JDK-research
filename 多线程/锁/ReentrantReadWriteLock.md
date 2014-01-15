@@ -358,40 +358,193 @@ __ReentrantReadWriteLock中的AQS__
              *    saturated, chain to version with full retry loop.
              */
             Thread current = Thread.currentThread();
-            int c = getState();
+            int c = getState();// 获取锁计数器
             if (exclusiveCount(c) != 0 &&
-                getExclusiveOwnerThread() != current)
+                getExclusiveOwnerThread() != current)// 如果排他计数器不等于0并且当前线程不是排它锁保持的线程，则获取共享锁失败
                 return -1;
-            int r = sharedCount(c);
+            int r = sharedCount(c);// 共享计数器值
             if (!readerShouldBlock() &&
                 r < MAX_COUNT &&
-                compareAndSetState(c, c + SHARED_UNIT)) {
-                if (r == 0) {
+                compareAndSetState(c, c + SHARED_UNIT)) {// 读线程不需要阻塞并且共享计数器没有饱和并且用CAS更新读计数器值成功
+                if (r == 0) {// 表示第一次进入读锁
                     firstReader = current;
                     firstReaderHoldCount = 1;
-                } else if (firstReader == current) {
+                } else if (firstReader == current) {// 表示重入读锁，并且当前线程就是firstReader
                     firstReaderHoldCount++;
-                } else {
-                    HoldCounter rh = cachedHoldCounter;
-                    if (rh == null || rh.tid != current.getId())
-                        cachedHoldCounter = rh = readHolds.get();
-                    else if (rh.count == 0)
+                } else {// 重入读锁，当前线程不是firstReader
+                    HoldCounter rh = cachedHoldCounter;// 从缓存中获取HoldCounter，可以参考上面HoldCounter的注释
+                    if (rh == null || rh.tid != current.getId())// 没有获取到HoldCounter，或者获取到的HoldCounter不是当前线程的
+                        cachedHoldCounter = rh = readHolds.get(); // 从当前线程中读取HoldCounter存到变量cachedHoldCounter和rh
+                    else if (rh.count == 0) // count等于0的情况需要特殊处理，其他情况只需要count加1
                         readHolds.set(rh);
                     rh.count++;
                 }
                 return 1;
             }
-            return fullTryAcquireShared(current);
+            return fullTryAcquireShared(current);// 完整版本的获取共享锁
         }
         
  `tryAcquireShared`这个方法的实现思路是这样的：  
 1. 如果另一个线程保持写锁，则失败。
-2. 否则，这个线程符合锁的状态，由于排队策略，所以需要询问是否应该阻塞。如果不阻塞，尝试通CAS更改状态和更新计数器值取得授权。注意哪些步骤没有检测重入获取，这会推迟到`fullTryAcquireShared`去避免在典型的不可重入的场景必须检测保持的计数器。
+2. 否则，这个线程符合锁的状态，由于排队策略，所以需要询问是否应该阻塞。如果不阻塞，尝试通CAS更改状态和更新计数器值取得授权。注意那个步骤没有检测重入获取，这会推迟到`fullTryAcquireShared`去避免在典型的不可重入的场景必须检测保持的计数器。
 3. 如果步骤2失败，要么是线程不符合条件，要么CAS失败，要么计数器值溢出，链接到方法`fullTryAcquireShared`。
 
-__公平锁__
+ 接下去看看完整版本的获取读锁`fullTryAcquireShared`的代码：
+ 
+        /**
+         * Full version of acquire for reads, that handles CAS misses
+         * and reentrant reads not dealt with in tryAcquireShared.
+         */
+        final int fullTryAcquireShared(Thread current) {
+            /*
+             * This code is in part redundant with that in
+             * tryAcquireShared but is simpler overall by not
+             * complicating tryAcquireShared with interactions between
+             * retries and lazily reading hold counts.
+             */
+            HoldCounter rh = null;
+            for (;;) {
+                int c = getState();
+                if (exclusiveCount(c) != 0) {
+                    if (getExclusiveOwnerThread() != current)
+                        return -1;
+                    // else we hold the exclusive lock; blocking here
+                    // would cause deadlock.
+                } else if (readerShouldBlock()) {
+                    // Make sure we're not acquiring read lock reentrantly
+                    if (firstReader == current) {
+                        // assert firstReaderHoldCount > 0;
+                    } else {
+                        if (rh == null) {
+                            rh = cachedHoldCounter;
+                            if (rh == null || rh.tid != current.getId()) {
+                                rh = readHolds.get();
+                                if (rh.count == 0)
+                                    readHolds.remove();
+                            }
+                        }
+                        if (rh.count == 0)
+                            return -1;
+                    }
+                }
+                if (sharedCount(c) == MAX_COUNT)
+                    throw new Error("Maximum lock count exceeded");
+                if (compareAndSetState(c, c + SHARED_UNIT)) {
+                    if (sharedCount(c) == 0) {
+                        firstReader = current;
+                        firstReaderHoldCount = 1;
+                    } else if (firstReader == current) {
+                        firstReaderHoldCount++;
+                    } else {
+                        if (rh == null)
+                            rh = cachedHoldCounter;
+                        if (rh == null || rh.tid != current.getId())
+                            rh = readHolds.get();
+                        else if (rh.count == 0)
+                            readHolds.set(rh);
+                        rh.count++;
+                        cachedHoldCounter = rh; // cache for release
+                    }
+                    return 1;
+                }
+            }
+        }
 
-__非公平锁__
+ 获取读锁的完整版本，用于处理CAS失误和`tryAcquireShared`没有处理的重入读。
 
+ 此代码部分和`tryAcquireShared`方法冗余，但是通过不让重试和延迟读保持计数器与`tryAcquireShared`产生复杂的相互作用让总体比较简单。
+ 
+        protected final boolean tryReleaseShared(int unused) {
+            Thread current = Thread.currentThread();
+            if (firstReader == current) {
+                // assert firstReaderHoldCount > 0;
+                if (firstReaderHoldCount == 1)
+                    firstReader = null;
+                else
+                    firstReaderHoldCount--;
+            } else {
+                HoldCounter rh = cachedHoldCounter;
+                if (rh == null || rh.tid != current.getId())
+                    rh = readHolds.get();
+                int count = rh.count;
+                if (count <= 1) {
+                    readHolds.remove();
+                    if (count <= 0)
+                        throw unmatchedUnlockException();
+                }
+                --rh.count;
+            }
+            for (;;) {
+                int c = getState();
+                int nextc = c - SHARED_UNIT;
+                if (compareAndSetState(c, nextc))
+                    // Releasing the read lock has no effect on readers,
+                    // but it may allow waiting writers to proceed if
+                    // both read and write locks are now free.
+                    return nextc == 0;
+            }
+        }
+        
+ 这个方法用于释放共享锁，实现思路是这样的：  
+1. 判断当前线程是不是`firstReader`，如果是的话需要把`firstReaderHoldCount`计数器减一（当`firstReaderHoldCount`值为1 的时候，需要清空`firstReader`）。  
+2. 否则，从`cachedHoldCounter`获取当前线程的HoldCounter，如果获取到的HoldCounter是空的或者它不是当前线程的HoldCounter，那么从`readHolds`获取HoldCounter，然后对HoldCounter的count减一（这里需要处理count为1的情况）。  
+3. 通过`compareAndSetState`设置计数器值。
 
+ 需要注意的是：释放读锁不会影响读线程，但是同时释放读锁和写锁可能允许等待的写线程继续执行。
+ 
+__公平锁 VS 非公平锁__
 
+ 这两者的区别在于读和写的时候是否需要排队，`ReentrantReadWriteLock`通过下面两个方法来实现的(在上面的分析中提到过)：
+ 
+         boolean writerShouldBlock();
+         
+         boolean readerShouldBlock();
+         
+ `writerShouldBlock`在`tryAcquire`方法中被调用，`readerShouldBlock`在`tryAcquireShared`和`fullTryAcquireShared`方法中被调用。
+ 
+ 非公平锁中的实现：  
+ 
+        final boolean writerShouldBlock() {
+            return false; // writers can always barge
+        }
+        final boolean readerShouldBlock() {
+            /* As a heuristic to avoid indefinite writer starvation,
+             * block if the thread that momentarily appears to be head
+             * of queue, if one exists, is a waiting writer.  This is
+             * only a probabilistic effect since a new reader will not
+             * block if there is a waiting writer behind other enabled
+             * readers that have not yet drained from the queue.
+             */
+            return apparentlyFirstQueuedIsExclusive();
+        }
+
+ 从代码看出，在非公平锁中`writerShouldBlock`永远返回false（意味着不需要阻塞）。`readerShouldBlock`则调用AQS的`apparentlyFirstQueuedIsExclusive`方法，主要是为了避免写线程不确定的饥饿，如果这个线程暂时出现在队列的头部则阻塞，如果存在的话，它是一个写线程。这只是一定概率的影响，因为如果有落后于其它运行的读线程的写线程尚未从队列中弹出，则一个新的读线程不会阻塞。
+ 
+ 公平锁中的实现：
+ 
+        final boolean writerShouldBlock() {
+            return hasQueuedPredecessors();
+        }
+        final boolean readerShouldBlock() {
+            return hasQueuedPredecessors();
+        }
+        
+ 这两个方法都是通过`hasQueuedPredecessors`的逻辑来实现的。如果在当前线程之前，有线程在等待获取锁，那么返回`true`，当前线程将被阻塞，否则当前线程不需要阻塞。
+ 
+## 锁API使用
+
+以下是通用API：
+
+    final ReadWriteLock rwl = new ReentrantReadWriteLock();  
+    final Lock readLock = rwl.readLock();  
+    final Lock writeLock = rwl.writeLock();
+        
+如果想要使用更加强大的功能，请使用下面的API：  
+ 
+    final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();   
+    final ReentrantReadWriteLock.ReadLock readLock = rwl.readLock();  
+    final ReentrantReadWriteLock.WriteLock writeLock = rwl.writeLock();
+    
+不难看出，`ReentrantReadWriteLock`对于锁的操作都是委托给`ReadLock`和`WriteLock`这两个内部类来实现的（最终还是委托给继承AQS的`Sync`）。
+
+全文完-
