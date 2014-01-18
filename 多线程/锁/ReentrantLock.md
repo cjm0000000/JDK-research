@@ -26,11 +26,11 @@
 		 }
 	   }
 	 }
-	 
-In addition to implementing the Lock interface, this class defines methods isLocked and getLockQueueLength, as well as some associated protected access methods that may be useful for instrumentation and monitoring.
 
-Serialization of this class behaves in the same way as built-in locks: a deserialized lock is in the unlocked state, regardless of its state when serialized.
+除了实现`Lock`接口的方法，这个类定义方法`isLocked`和`getLockQueueLength`，以及一些对植入和监控有用的相关的`protected`方法。
 
-This lock supports a maximum of 2147483647 recursive locks by the same thread. Attempts to exceed this limit result in Error throws from locking methods.
+此类和内置锁有相同的序列化行为：不管序列化的时候锁处于什么状态，反序列化后的锁处于非锁定状态。
+
+此锁支持被同一个线程递归锁定最多2147483647次。尝试超过这个限制会导致锁定方法抛出`Error`。
 
 ## 内部实现
